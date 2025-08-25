@@ -17,8 +17,11 @@ const server = http.createServer(app); // ✅ wrap express with http server
 connectDB();
 
 app.use(express.json());
-app.use(cors());
-
+app.use(cors({
+  origin: "https://ghostmedia.vercel.app", 
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true, 
+}));
 // attach socket.io to http server
 const io = new Server(server, {
   cors: {
