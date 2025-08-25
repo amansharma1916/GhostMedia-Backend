@@ -8,6 +8,7 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 import http from "http";   // ✅ you need this
 
+
 dotenv.config();
 
 const app = express();
@@ -18,7 +19,7 @@ connectDB();
 
 app.use(express.json());
 app.use(cors({
-  origin: "https://ghostmedia.vercel.app", 
+  origin: process.env.Frontend_URL, 
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true, 
 }));
