@@ -115,13 +115,13 @@ app.post("/api/updateProfileImage", async (req, res) => {
 
 // Create post
 app.post("/api/user/createPost", async (req, res) => {
-  const { username, content, ghostMode, image } = req.body;
+  const { username, content, ghostMode, userAvatar } = req.body;
   if (!username || !content) {
     return res.status(400).json({ message: "Username and content are required" });
   }
 
   try {
-    const post = new Post({ username, content });
+    const post = new Post({ username, content , ghostMode, userAvatar });
     await post.save();
 
     // Emit to all sockets

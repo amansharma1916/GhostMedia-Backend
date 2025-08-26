@@ -17,6 +17,10 @@ const postSchema = new mongoose.Schema({
     isGhost: {
         type: Boolean,
         default: false
+    },
+    userAvatar: {
+        type: String,
+        required: true
     }
 });
 
