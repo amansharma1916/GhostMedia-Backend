@@ -29,6 +29,14 @@ const postSchema = new mongoose.Schema({
     isEdited: {
         type: Boolean,
         default: false
+    },
+    isTemporary: {
+        type: Boolean,
+        default: false
+    },
+    expirationDate: {
+        type: Date,
+        default: null
     }
 });
 

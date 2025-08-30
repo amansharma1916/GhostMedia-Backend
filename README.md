@@ -6,6 +6,8 @@ GhostMedia is a social media platform that allows users to share posts with an o
 
 - **User Authentication**: Register and login with secure password hashing
 - **Ghost Mode**: Post content anonymously while hiding your identity
+- **Temporary Posts**: Create posts that automatically expire and delete after a set time
+- **Dark/Light Theme Support**: Backend APIs support the frontend's theme preferences
 - **Friend System**: Send, accept, and decline friend requests
 - **Real-time Updates**: Live notifications and post updates via Socket.io
 - **Post Management**: Create, edit, and delete posts with ease

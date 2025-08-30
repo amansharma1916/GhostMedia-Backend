@@ -8,6 +8,10 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 import http from "http";
 import Friend from "./Models/friend.js";
+import Message from "./Models/message.js";
+
+// Import routes
+import messagesRoutes from "./Routes/messages.js";
 
 
 dotenv.config();
@@ -24,6 +28,9 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true,
 }));
+
+// Use routes
+app.use('/api/messages', messagesRoutes);
 // attach socket.io to http server
 const io = new Server(server, {
   cors: {
@@ -54,6 +61,10 @@ io.on("connection", (socket) => {
 
     // Fetch pending requests when user connects
     socket.emit("refreshFriendRequests");
+
+    // Broadcast online users list to all connected clients
+    const onlineUsersList = Array.from(onlineUsers.keys());
+    io.emit("onlineUsers", onlineUsersList);
   });
 
   socket.on("newPost", (post) => {
@@ -76,7 +87,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Handle user typing notification for future chat feature
+  // Handle user typing notification for chat feature
   socket.on("userTyping", (data) => {
     if (data.to && onlineUsers.has(data.to)) {
       io.to(data.to).emit("userTypingEvent", {
@@ -86,12 +97,31 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Handle private messages
+  socket.on("privateMessage", (data) => {
+    const { sender, receiver, content, timestamp } = data;
+
+    // Emit to the receiver if they're online
+    if (onlineUsers.has(receiver)) {
+      io.to(receiver).emit("privateMessage", data);
+    }
+
+    // Also mark the message as read if the receiver is online
+    if (onlineUsers.has(receiver)) {
+      data.read = true;
+    }
+  });
+
   socket.on("disconnect", () => {
     console.log("Client disconnected", socket.id);
     if (currentUsername) {
       socket.leave(currentUsername);
       // Remove from online users map
       onlineUsers.delete(currentUsername);
+
+      // Broadcast updated online users list
+      const onlineUsersList = Array.from(onlineUsers.keys());
+      io.emit("onlineUsers", onlineUsersList);
     }
   });
 });
@@ -166,7 +196,7 @@ app.post("/api/updateProfileImage", async (req, res) => {
 
 // Create post
 app.post("/api/user/createPost", async (req, res) => {
-  const { username, content, ghostMode, userAvatar } = req.body;
+  const { username, content, ghostMode, userAvatar, temporaryPost, expirationDate } = req.body;
   if (!username || !content) {
     return res.status(400).json({ message: "Username and content are required" });
   }
@@ -176,9 +206,29 @@ app.post("/api/user/createPost", async (req, res) => {
       username,
       content,
       isGhost: ghostMode || false,  // Store ghost mode in isGhost field
-      userAvatar
+      userAvatar,
+      isTemporary: temporaryPost || false,
+      expirationDate: temporaryPost ? expirationDate : null
     });
     await post.save();
+
+    // If it's a temporary post, set up automatic deletion
+    if (temporaryPost && expirationDate) {
+      const expirationTime = new Date(expirationDate).getTime() - Date.now();
+      setTimeout(async () => {
+        try {
+          // Find and delete the expired post
+          await Post.findByIdAndDelete(post._id);
+
+          // Emit post deleted event
+          io.emit("postDeleted", { _id: post._id, reason: "expired" });
+
+          console.log(`Temporary post ${post._id} has expired and been deleted`);
+        } catch (err) {
+          console.error(`Error deleting expired post: ${err}`);
+        }
+      }, expirationTime);
+    }
 
     // Emit to all sockets
     io.emit("postAdded", post);
@@ -425,6 +475,81 @@ app.get("/", (req, res) => {
 
 app.get("/ping", (req, res) => {
   res.send("Pong");
+});
+
+// Send a private message
+app.post("/api/send-message", async (req, res) => {
+  const { sender, receiver, content, timestamp } = req.body;
+
+  if (!sender || !receiver || !content) {
+    return res.status(400).json({ message: "Sender, receiver, and content are required" });
+  }
+
+  try {
+    // Create and save the message
+    const message = new Message({
+      sender,
+      receiver,
+      content,
+      timestamp: timestamp || new Date(),
+      // Message is considered read if the receiver is the same as sender (e.g., for testing)
+      read: sender === receiver
+    });
+
+    await message.save();
+
+    res.status(201).json({
+      message: "Message sent successfully",
+      data: message
+    });
+  } catch (error) {
+    console.error("Error sending message:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get messages between two users
+app.get("/api/messages/:user1/:user2", async (req, res) => {
+  const { user1, user2 } = req.params;
+
+  try {
+    // Find messages where either user is sender and the other is receiver
+    const messages = await Message.find({
+      $or: [
+        { sender: user1, receiver: user2 },
+        { sender: user2, receiver: user1 }
+      ]
+    }).sort({ timestamp: 1 });
+
+    // Mark messages as read where current user is the receiver
+    await Message.updateMany(
+      { sender: user2, receiver: user1, read: false },
+      { $set: { read: true } }
+    );
+
+    res.json(messages);
+  } catch (error) {
+    console.error("Error fetching messages:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get unread message count for a user
+app.get("/api/messages/unread/:username", async (req, res) => {
+  const { username } = req.params;
+
+  try {
+    // Get count of unread messages grouped by sender
+    const unreadCounts = await Message.aggregate([
+      { $match: { receiver: username, read: false } },
+      { $group: { _id: "$sender", count: { $sum: 1 } } }
+    ]);
+
+    res.json(unreadCounts);
+  } catch (error) {
+    console.error("Error fetching unread message count:", error);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 // Check friendship status endpoint
