@@ -91,9 +91,10 @@ io.on("connection", (socket) => {
   socket.on("userTyping", (data) => {
     if (data.to && onlineUsers.has(data.to)) {
       io.to(data.to).emit("userTypingEvent", {
-        from: currentUsername,
+        from: data.from || currentUsername,
         isTyping: data.isTyping
       });
+      console.log(`User ${data.from || currentUsername} ${data.isTyping ? 'is typing to' : 'stopped typing to'} ${data.to}`);
     }
   });
 
@@ -104,15 +105,24 @@ io.on("connection", (socket) => {
     // Emit to the receiver if they're online
     if (onlineUsers.has(receiver)) {
       io.to(receiver).emit("privateMessage", data);
+      console.log(`Sent message to ${receiver}: ${content.substring(0, 20)}...`);
+    } else {
+      console.log(`User ${receiver} is offline. Message will be delivered when they connect.`);
     }
 
     // Also mark the message as read if the receiver is online
     if (onlineUsers.has(receiver)) {
       data.read = true;
     }
-  });
 
-  socket.on("disconnect", () => {
+    // Also send to sender to confirm message delivery
+    if (sender !== receiver && onlineUsers.has(sender)) {
+      io.to(sender).emit("messageDelivered", {
+        id: data._id,
+        timestamp: new Date().toISOString()
+      });
+    }
+  }); socket.on("disconnect", () => {
     console.log("Client disconnected", socket.id);
     if (currentUsername) {
       socket.leave(currentUsername);
