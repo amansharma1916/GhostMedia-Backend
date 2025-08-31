@@ -10,9 +10,6 @@ import http from "http";
 import Friend from "./Models/friend.js";
 import Message from "./Models/message.js";
 
-// Import routes
-import messagesRoutes from "./Routes/messages.js";
-
 
 dotenv.config();
 
@@ -28,9 +25,6 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true,
 }));
-
-// Use routes
-app.use('/api/messages', messagesRoutes);
 // attach socket.io to http server
 const io = new Server(server, {
   cors: {
@@ -46,8 +40,6 @@ io.on("connection", (socket) => {
 
   // Username tracking for real-time updates
   let currentUsername = null;
-  // Map to keep track of online users and their socket IDs
-  const onlineUsers = new Map();
 
   socket.on("userConnected", (username) => {
     if (!username) return;
@@ -55,19 +47,14 @@ io.on("connection", (socket) => {
     currentUsername = username;
     // Join a room with the username for targeted events
     socket.join(username);
-    // Add user to online users map
-    onlineUsers.set(username, socket.id);
     console.log(`User ${username} connected and joined room`);
 
     // Fetch pending requests when user connects
     socket.emit("refreshFriendRequests");
-
-    // Broadcast online users list to all connected clients
-    const onlineUsersList = Array.from(onlineUsers.keys());
-    io.emit("onlineUsers", onlineUsersList);
   });
 
   socket.on("newPost", (post) => {
+    // Broadcast to all clients when a new post is created
     io.emit("postAdded", post);
   });
 
@@ -87,51 +74,118 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Handle user typing notification for chat feature
-  socket.on("userTyping", (data) => {
-    if (data.to && onlineUsers.has(data.to)) {
-      io.to(data.to).emit("userTypingEvent", {
-        from: data.from || currentUsername,
-        isTyping: data.isTyping
+  // Chat Message Handling
+  socket.on("sendMessage", async (data) => {
+    try {
+      const { sender, receiver, content, isGhost, expirationDate } = data;
+
+      // Validate required fields
+      if (!sender || !receiver || !content) {
+        socket.emit("messageError", { error: "Missing required fields" });
+        return;
+      }
+
+      // Create and save the message
+      const message = new Message({
+        sender,
+        receiver,
+        content,
+        isGhost: isGhost || false,
+        expirationDate: (isGhost && expirationDate) ? expirationDate : null
       });
-      console.log(`User ${data.from || currentUsername} ${data.isTyping ? 'is typing to' : 'stopped typing to'} ${data.to}`);
+
+      await message.save();
+
+      // Emit the message to both sender and receiver
+      io.to(receiver).emit("newMessage", message);
+      io.to(sender).emit("messageSent", message);
+
+      // If it's a ghost message, set up auto-deletion after being read
+      if (isGhost && expirationDate) {
+        const expirationTime = new Date(expirationDate).getTime() - Date.now();
+        setTimeout(async () => {
+          try {
+            // Only delete if it hasn't been read yet
+            const msgToDelete = await Message.findById(message._id);
+            if (msgToDelete && !msgToDelete.isRead) {
+              await Message.findByIdAndUpdate(message._id, { isDeleted: true });
+
+              // Notify both users about the deletion
+              io.to(sender).emit("messageExpired", { messageId: message._id });
+              io.to(receiver).emit("messageExpired", { messageId: message._id });
+            }
+          } catch (err) {
+            console.error(`Error handling ghost message expiration: ${err}`);
+          }
+        }, expirationTime);
+      }
+    } catch (error) {
+      console.error("Error sending message:", error);
+      socket.emit("messageError", { error: "Failed to send message" });
     }
   });
 
-  // Handle private messages
-  socket.on("privateMessage", (data) => {
-    const { sender, receiver, content, timestamp } = data;
+  // Mark messages as read
+  socket.on("markMessagesRead", async (data) => {
+    try {
+      const { messageIds, username } = data;
 
-    // Emit to the receiver if they're online
-    if (onlineUsers.has(receiver)) {
-      io.to(receiver).emit("privateMessage", data);
-      console.log(`Sent message to ${receiver}: ${content.substring(0, 20)}...`);
-    } else {
-      console.log(`User ${receiver} is offline. Message will be delivered when they connect.`);
-    }
+      if (!messageIds || !Array.isArray(messageIds) || !username) {
+        return;
+      }
 
-    // Also mark the message as read if the receiver is online
-    if (onlineUsers.has(receiver)) {
-      data.read = true;
-    }
-
-    // Also send to sender to confirm message delivery
-    if (sender !== receiver && onlineUsers.has(sender)) {
-      io.to(sender).emit("messageDelivered", {
-        id: data._id,
-        timestamp: new Date().toISOString()
+      // Find the messages and verify receiver
+      const messages = await Message.find({
+        _id: { $in: messageIds },
+        receiver: username,
+        isRead: false
       });
+
+      if (messages.length === 0) return;
+
+      // Update all messages at once
+      await Message.updateMany(
+        { _id: { $in: messageIds }, receiver: username },
+        { $set: { isRead: true } }
+      );
+
+      // Get senders to notify them
+      const senders = [...new Set(messages.map(msg => msg.sender))];
+
+      // Notify each sender that their messages were read
+      senders.forEach(sender => {
+        const senderMessages = messages.filter(msg => msg.sender === sender);
+        if (senderMessages.length > 0) {
+          io.to(sender).emit("messagesRead", {
+            reader: username,
+            messageIds: senderMessages.map(msg => msg._id)
+          });
+        }
+      });
+
+      // Also notify this user for UI update
+      socket.emit("messageStatusUpdated", { messageIds });
+
+    } catch (error) {
+      console.error("Error marking messages as read:", error);
     }
-  }); socket.on("disconnect", () => {
+  });
+
+  // User is typing indicator
+  socket.on("typing", (data) => {
+    const { sender, receiver } = data;
+    io.to(receiver).emit("userTyping", { sender });
+  });
+
+  socket.on("stopTyping", (data) => {
+    const { sender, receiver } = data;
+    io.to(receiver).emit("userStoppedTyping", { sender });
+  });
+
+  socket.on("disconnect", () => {
     console.log("Client disconnected", socket.id);
     if (currentUsername) {
       socket.leave(currentUsername);
-      // Remove from online users map
-      onlineUsers.delete(currentUsername);
-
-      // Broadcast updated online users list
-      const onlineUsersList = Array.from(onlineUsers.keys());
-      io.emit("onlineUsers", onlineUsersList);
     }
   });
 });
@@ -487,81 +541,6 @@ app.get("/ping", (req, res) => {
   res.send("Pong");
 });
 
-// Send a private message
-app.post("/api/send-message", async (req, res) => {
-  const { sender, receiver, content, timestamp } = req.body;
-
-  if (!sender || !receiver || !content) {
-    return res.status(400).json({ message: "Sender, receiver, and content are required" });
-  }
-
-  try {
-    // Create and save the message
-    const message = new Message({
-      sender,
-      receiver,
-      content,
-      timestamp: timestamp || new Date(),
-      // Message is considered read if the receiver is the same as sender (e.g., for testing)
-      read: sender === receiver
-    });
-
-    await message.save();
-
-    res.status(201).json({
-      message: "Message sent successfully",
-      data: message
-    });
-  } catch (error) {
-    console.error("Error sending message:", error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-// Get messages between two users
-app.get("/api/messages/:user1/:user2", async (req, res) => {
-  const { user1, user2 } = req.params;
-
-  try {
-    // Find messages where either user is sender and the other is receiver
-    const messages = await Message.find({
-      $or: [
-        { sender: user1, receiver: user2 },
-        { sender: user2, receiver: user1 }
-      ]
-    }).sort({ timestamp: 1 });
-
-    // Mark messages as read where current user is the receiver
-    await Message.updateMany(
-      { sender: user2, receiver: user1, read: false },
-      { $set: { read: true } }
-    );
-
-    res.json(messages);
-  } catch (error) {
-    console.error("Error fetching messages:", error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-// Get unread message count for a user
-app.get("/api/messages/unread/:username", async (req, res) => {
-  const { username } = req.params;
-
-  try {
-    // Get count of unread messages grouped by sender
-    const unreadCounts = await Message.aggregate([
-      { $match: { receiver: username, read: false } },
-      { $group: { _id: "$sender", count: { $sum: 1 } } }
-    ]);
-
-    res.json(unreadCounts);
-  } catch (error) {
-    console.error("Error fetching unread message count:", error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
 // Check friendship status endpoint
 app.get("/api/checkFriendshipStatus/:currentUser/:otherUser", async (req, res) => {
   const { currentUser, otherUser } = req.params;
@@ -837,6 +816,112 @@ app.delete("/api/unfriend/:friendshipId", async (req, res) => {
     return res.json({ message: "Friend removed successfully" });
   } catch (error) {
     console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Message Routes
+
+// Get conversation history between two users
+app.get("/api/messages/:user1/:user2", async (req, res) => {
+  const { user1, user2 } = req.params;
+  const { limit = 50, before } = req.query;
+
+  try {
+    // Build the query
+    let query = {
+      $or: [
+        { sender: user1, receiver: user2 },
+        { sender: user2, receiver: user1 }
+      ],
+      isDeleted: false // Only return non-deleted messages
+    };
+
+    // If pagination is requested
+    if (before) {
+      query.createdAt = { $lt: new Date(before) };
+    }
+
+    const messages = await Message.find(query)
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    res.json(messages.reverse()); // Return in chronological order
+  } catch (error) {
+    console.error("Error fetching messages:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get unread message count for a user
+app.get("/api/messages/unread/:username", async (req, res) => {
+  const { username } = req.params;
+
+  try {
+    // Count unread messages for this user, grouped by sender
+    const unreadCounts = await Message.aggregate([
+      {
+        $match: {
+          receiver: username,
+          isRead: false,
+          isDeleted: false
+        }
+      },
+      {
+        $group: {
+          _id: "$sender",
+          count: { $sum: 1 },
+          lastMessage: { $last: "$content" },
+          lastMessageTime: { $last: "$createdAt" }
+        }
+      },
+      {
+        $project: {
+          sender: "$_id",
+          count: 1,
+          lastMessage: 1,
+          lastMessageTime: 1,
+          _id: 0
+        }
+      }
+    ]);
+
+    res.json(unreadCounts);
+  } catch (error) {
+    console.error("Error fetching unread counts:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Delete a message (soft delete)
+app.delete("/api/messages/:messageId", async (req, res) => {
+  const { messageId } = req.params;
+  const { username } = req.body;
+
+  try {
+    const message = await Message.findById(messageId);
+
+    if (!message) {
+      return res.status(404).json({ message: "Message not found" });
+    }
+
+    // Check if user is authorized to delete this message
+    if (message.sender !== username && message.receiver !== username) {
+      return res.status(403).json({ message: "Not authorized to delete this message" });
+    }
+
+    // Soft delete the message
+    message.isDeleted = true;
+    await message.save();
+
+    // Notify both users about the deletion via socket
+    io.to(message.sender).emit("messageDeleted", { messageId });
+    io.to(message.receiver).emit("messageDeleted", { messageId });
+
+    res.json({ message: "Message deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting message:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
