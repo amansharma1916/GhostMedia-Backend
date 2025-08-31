@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import http from "http";
 import Friend from "./Models/friend.js";
 import Message from "./Models/message.js";
+import adminRoutes from "./routes/adminRoutes.js";
 
 
 dotenv.config();
@@ -540,6 +541,9 @@ app.get("/", (req, res) => {
 app.get("/ping", (req, res) => {
   res.send("Pong");
 });
+
+// Admin routes
+app.use("/api", adminRoutes);
 
 // Check friendship status endpoint
 app.get("/api/checkFriendshipStatus/:currentUser/:otherUser", async (req, res) => {
