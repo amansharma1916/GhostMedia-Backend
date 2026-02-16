@@ -160,8 +160,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Contributors
 
-- [Your Name](https://github.com/yourusername)
+- [Aman Sharma](https://github.com/amansharma1916)
 
 ---
 
-Made with ❤️ by GhostMedia Team
+Made with ❤️ by GhostMedia Team - Aman
